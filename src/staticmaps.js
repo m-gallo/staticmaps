@@ -323,9 +323,11 @@ class StaticMaps {
     return `<${(line.type === 'polyline') ? 'polyline' : 'polygon'}
                 style="fill-rule: inherit;"
                 points="${points.join(' ')}"
-                stroke="${line.color}"
+                stroke="${line.color}"                
+                stroke-width="${line.width}"
+                stroke-opacity="${line.opacity}"
                 fill="${line.fill ? line.fill : 'none'}"
-                stroke-width="${line.width}"/>`;
+                fill-opacity="${line.fillOpacity}"/>`;
   }
 
   processChunk(lines, imageMetadata) {

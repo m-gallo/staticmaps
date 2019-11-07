@@ -10,6 +10,8 @@ export default class Polyline {
     this.color = this.options.color || '#000000BB';
     this.fill = this.options.fill;
     this.width = this.options.width || 3;
+    this.opacity = this.options.opacity || 1;
+    this.fillOpacity = this.options.fillOpacity || 1;
     this.simplify = this.options.simplify || false;
     this.type = (isEqual(first(this.coords), last(this.coords)))
       ? 'polygon' : 'polyline';
