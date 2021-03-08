@@ -2,6 +2,7 @@ import path from 'path';
 
 import StaticMaps from '../src/staticmaps';
 import GeoJSON from './static/geojson';
+import MultiPolygonGeometry from './static/multipolygonGeometry';
 import Route from './static/routeLong';
 
 const { expect } = require('chai');
@@ -17,6 +18,7 @@ describe('StaticMap', () => {
           height: 200,
         };
         const map = new StaticMaps(options);
+        expect(map.constructor.name).to.be.equal('StaticMaps');
       }).to.not.throw();
     });
   });
@@ -91,6 +93,34 @@ describe('StaticMap', () => {
         .catch(done);
     }).timeout(0);
 
+    it('render w/ remote url icon', (done) => {
+      const options = {
+        width: 500,
+        height: 500,
+      };
+
+      const map = new StaticMaps(options);
+
+      const marker = {
+        img: 'https://img.icons8.com/color/48/000000/marker.png',
+        offsetX: 24,
+        offsetY: 48,
+        width: 48,
+        height: 48,
+      };
+
+      marker.coord = [13.437524, 52.4945528];
+      map.addMarker(marker);
+
+      marker.coord = [13.430524, 52.4995528];
+      map.addMarker(marker);
+
+      map.render([13.437524, 52.4945528], 12)
+        .then(() => map.image.save('test/out/04-marker-remote.png'))
+        .then(done)
+        .catch(console.log);
+    }).timeout(0);
+
     it('render w/out center', (done) => {
       const options = {
         width: 1200,
@@ -119,7 +149,7 @@ describe('StaticMap', () => {
     }).timeout(0);
   });
 
-  describe('Rendering w/ lines ...', () => {
+  describe('Rendering w/ polylines ...', () => {
     it('Render StaticMap w/ single polyline', (done) => {
       const options = {
         width: 800,
@@ -151,7 +181,9 @@ describe('StaticMap', () => {
         .then(done)
         .catch(done);
     }).timeout(0);
+  });
 
+  describe('Rendering w/ polygons ...', () => {
     it('Render StaticMap w/ polygon', (done) => {
       const options = {
         width: 600,
@@ -176,6 +208,30 @@ describe('StaticMap', () => {
         .catch(done);
     }).timeout(0);
 
+    it('Render StaticMap w/ multipolygon', (done) => {
+      const options = {
+        width: 600,
+        height: 300,
+        paddingX: 80,
+        paddingY: 80,
+      };
+
+      const map = new StaticMaps(options);
+
+      const multipolygon = {
+        coords: MultiPolygonGeometry.geometry.coordinates,
+        color: '#0000FFBB',
+        fill: '#000000BB',
+        width: 1,
+      };
+
+      map.addMultiPolygon(multipolygon);
+      map.render()
+        .then(() => map.image.save('test/out/07-multipolygon.png'))
+        .then(done)
+        .catch(done);
+    }).timeout(0);
+
     it('Render StaticMap w/ thousands of polygons', (done) => {
       const options = {
         width: 600,
@@ -196,6 +252,41 @@ describe('StaticMap', () => {
       for (let i = 0; i < 10000; i++) map.addPolygon({ ...polygon });
       map.render([13.437524, 52.4945528], 13)
         .then(() => map.image.save('test/out/07-multiple-polygons.png'))
+        .then(done)
+        .catch(done);
+    }).timeout(0);
+  });
+
+  describe('Rendering circles ...', () => {
+    it('Render StaticMap w/ circle', (done) => {
+      const options = {
+        width: 600,
+        height: 300,
+        paddingX: 20,
+        paddingY: 20,
+      };
+
+      const map = new StaticMaps(options);
+
+      const circle = {
+        coord: [13.01, 51.98],
+        radius: 500,
+        fill: '#000000',
+        width: 0,
+      };
+
+      const circle2 = {
+        coord: [13.01, 51.98],
+        radius: 800,
+        fill: '#fab700CC',
+        color: '#FFFFFF',
+        width: 2,
+      };
+
+      map.addCircle(circle2);
+      map.addCircle(circle);
+      map.render()
+        .then(() => map.image.save('test/out/099-circle.png'))
         .then(done)
         .catch(done);
     }).timeout(0);
@@ -233,7 +324,9 @@ describe('StaticMap', () => {
         width: 1200,
         height: 800,
         tileUrl: 'https://map1.vis.earthdata.nasa.gov/wmts-webmerc/BlueMarble_NextGeneration/default/GoogleMapsCompatible_Level8/{z}/{y}/{x}.jpg',
-        maxZoom: 8,
+        zoomRange: {
+          max: 8,
+        },
       };
 
       const map = new StaticMaps(options);
@@ -267,8 +360,27 @@ describe('StaticMap', () => {
       map.render([13.437524, 52.4945528], 13)
         .then(() => map.image.buffer('image/png'))
         .then((buffer) => {
+          expect(buffer).to.be.an.instanceof(Buffer);
           done();
         })
+        .catch(done);
+    }).timeout(0);
+  });
+
+  describe('Fetch tiles from subdomains', () => {
+    it('should fetch from subdomains', (done) => {
+      const options = {
+        width: 1024,
+        height: 1024,
+        subdomains: ['a', 'b', 'c'],
+        tileUrl: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png',
+      };
+
+      const map = new StaticMaps(options);
+
+      map.render([13.437524, 52.4945528], 13)
+        .then(() => map.image.save('test/out/10-subdomains.png'))
+        .then(done)
         .catch(done);
     }).timeout(0);
   });

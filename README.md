@@ -1,11 +1,22 @@
 # StaticMaps [![npm version](https://badge.fury.io/js/staticmaps.svg)](https://badge.fury.io/js/staticmaps)
-A node.js library for creating map images with polylines, markers and text. This library is a node.js implementation of [Static Map](https://github.com/komoot/staticmap).
+A node.js library for creating map images with markers, polylines, polygons and text. This library is a node.js implementation of [Static Map](https://github.com/komoot/staticmap).
 
 ![Map with polyline](https://stephangeorg.github.io/staticmaps/sample/polyline.png?raw=true=800x280)
 
 ## Prerequisites
 
-Image manipulation is based on **[Sharp](http://sharp.dimens.io)**. Pre-compiled binaries for sharp are provided for use with Node versions 6, 8, 10, 11 and 12 on 64-bit Windows, OS X and Linux platforms. For other OS or using with **Heroku, Docker, AWS Lambda** please refer to [sharp installation instructions](http://sharp.dimens.io/en/stable/install/).
+Image manipulation is based on **[Sharp](https://sharp.pixelplumbing.com/)**. Pre-compiled binaries for sharp are provided for use with Node versions 10+ on 64-bit Windows, OS X and Linux platforms. For other OS or using with **Heroku, Docker, AWS Lambda** please refer to [sharp installation instructions](https://sharp.pixelplumbing.com/install).
+
+## Releases
+
+Version           | sharp            | node.js (pre-compiled)
+----------------- | ---------------- | -------------
+1.4.4+            | 0.27.1           | 10.16.0+
+1.3.4             | 0.25.2           | 10+
+1.2.6             | 0.23.2           | 8, 10, 12, 13
+1.2.3             | 0.22.1           | 6, 8, 10, 11, 12
+
+[Changelog](https://github.com/StephanGeorg/staticmaps/releases)
 
 ## Installation
 
@@ -28,19 +39,21 @@ const map = new StaticMaps(options);
 ```
 #### Map options
 
-Parameter           | Default            | Description
-------------------- | ------------------ | -------------
-width               | Required           | Width of the output image in px
-height              | Required           | Height of the output image in px
-paddingX            | 0                  | (optional) Minimum distance in px between map features and map border
-paddingY            | 0                  | (optional) Minimum distance in px between map features and map border
-tileUrl             |                    | (optional) Tile server URL for the map base layer
-tileSize            | 256                | (optional) Tile size in pixel
-tileRequestTimeout  |                    | (optional) Timeout for the tiles request
-tileRequestHeader   | {}                 | (optional) Additional headers for the tiles request (default: {})
-maxZoom             |                    | (optional) If defined, forces zoom to stay at least this far from the surface, useful for tile servers that error on high levels
-zoomRange           | { min: 1, max: 17} | (optional) If defined, defines the range of zoom levels to try
-reverseY            | false              | (optional) If true, reverse the y index of the tiles to match the TMS naming format
+Parameter           | Default             | Description
+------------------- | ------------------- | -------------
+width               | Required            | Width of the output image in px
+height              | Required            | Height of the output image in px
+paddingX            | 0                   | (optional) Minimum distance in px between map features and map border
+paddingY            | 0                   | (optional) Minimum distance in px between map features and map border
+tileUrl             |                     | (optional) Tile server URL for the map base layer
+tileSize            | 256                 | (optional) Tile size in pixel
+subdomains          | []                  | (optional) Subdomains of tile server, usage ['a', 'b', 'c']
+tileRequestTimeout  |                     | (optional) Timeout for the tiles request
+tileRequestHeader   | {}                  | (optional) Additional headers for the tiles request (default: {})
+tileRequestLimit    | 2                   | (optional) Limit concurrent connections to the tiles server
+zoomRange           | { min: 1, max: 17 } | (optional) Defines the range of zoom levels to try
+maxZoom             |                     | (optional) DEPRECATED: Use zoomRange.max instead: forces zoom to stay at least this far from the surface, useful for tile servers that error on high levels
+reverseY            | false               | (optional) If true, reverse the y index of the tiles to match the TMS naming format
 
 ### Methods
 #### addMarker (options)
@@ -74,7 +87,7 @@ Parameter           | Default   | Description
 ------------------- | --------- |-------------
 coords              | Required  |Coordinates of the polyline ([[Lng, Lat], ... ,[Lng, Lat]])
 color               | #000000BB |Stroke color of the polyline
-width               | 3         |Stroke width of the polyline 
+width               | 3         |Stroke width of the polyline
 ##### Usage example
 ```javascript
   const polyline = {
@@ -120,6 +133,52 @@ fill                | #000000BB | Fill color of the polygon
 ```
 ***
 
+#### addMultiPolygon(options)
+Adds a multipolygon to the map.
+```
+map.addMultiPolygon(options);
+```
+##### Multipolygon options
+Parameter           | Default   | Description
+------------------- | --------- | -------------
+coords              | Required  | Coordinates of the multipolygon ([[Lng, Lat], ... ,[Lng, Lat]])
+color               | #000000BB | Stroke color of the multipolygon  
+width               | 3         | Stroke width of the multipolygon
+fill                | #000000BB | Fill color of the multipolygon
+##### Usage example
+```javascript
+  const multipolygon = {
+    coords: [
+      [
+        [-89.9619685, 41.7792032],
+        [-89.959505, 41.7792084],
+        [-89.9594928, 41.7827904],
+        [-89.9631906, 41.7827815],
+        [-89.9632678, 41.7821559],
+        [-89.9634801, 41.7805341],
+        [-89.9635341, 41.780109],
+        [-89.9635792, 41.7796834],
+        [-89.9636183, 41.7792165],
+        [-89.9619685, 41.7792032],
+      ],
+      [
+        [-89.9631647, 41.7809413],
+        [-89.9632927, 41.7809487],
+        [-89.9631565, 41.781985],
+        [-89.9622404, 41.7819137],
+        [-89.9623616, 41.780997],
+        [-89.963029, 41.7810114],
+        [-89.9631647, 41.7809413],
+      ],
+    ],
+    color: '#0000FFBB',
+    width: 3
+  };
+
+  map.addMultiPolygon(multipolygon);
+```
+***
+
 #### addText(options)
 Adds text to the map.
 ```
@@ -141,13 +200,13 @@ anchor            | start     | Anchor of the text (`start`, `middle` or `end`)
 ```javascript
   const text = {
     coord: [13.437524, 52.4945528],
-    text: "My Text",
+    text: 'My Text',
     size: 50,
     width: 1,
-    fill: "#000000",
-    color: "#ffffff",
-    font: "Calibri",
-    anchor: "middle"
+    fill: '#000000',
+    color: '#ffffff',
+    font: 'Calibri',
+    anchor: 'middle'
   };
 
   map.addText(text);
@@ -325,7 +384,9 @@ const options = {
     width: 1200,
     height: 800,
     tileUrl: 'https://map1.vis.earthdata.nasa.gov/wmts-webmerc/BlueMarble_NextGeneration/default/GoogleMapsCompatible_Level8/{z}/{y}/{x}.jpg',
-    maxZoom: 8 // NASA server does not support level 9 or higher
+    zoomRange: {
+      max: 8, // NASA server does not support level 9 or higher
+    }
   };
 
   const map = new StaticMaps(options);
@@ -348,8 +409,27 @@ const options = {
 #### Output
 ![NASA Blue Marble with text](https://i.imgur.com/Jb6hsju.jpg)
 
+### Tile server with subdomains
+{s} - subdomain (subdomain), is necessary in order not to fall into the limit for requests to the same domain. Some servers can block your IP if you get tiles from one of subdomains of tile server.
+```javascript
+const options = {
+    width: 1024,
+    height: 1024,
+    subdomains: ['a', 'b', 'c'],
+    tileUrl: 'https://{s}.tile.openstreetmap.org/{z}/{x}/{y}.png'
+};
+
+const map = new StaticMaps(options);
+
+map.render([13.437524, 52.4945528], 13)
+.then(() => map.image.save('test/out/subdomains.png'));
+```
+
 # Contributers
 
++ [Jordi Casadevall Franco](https://github.com/JOGUI22)
++ [Joe Beuckman](https://github.com/jbeuckm)
++ [Ergashev Adizbek](https://github.com/Adizbek)
 + [Olivier Kamers](https://github.com/OlivierKamers)
 + [Wesley Flynn](https://github.com/wesflynn)
 + [Thomas Konings](https://github.com/tkon99)

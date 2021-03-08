@@ -1,28 +1,20 @@
-import request from 'request-promise';
+import got from 'got';
 import sharp from 'sharp';
 import find from 'lodash.find';
 import uniqBy from 'lodash.uniqby';
 import url from 'url';
-import process from 'process';
 import chunk from 'lodash.chunk';
 
 import Image from './image';
 import IconMarker from './marker';
 import Polyline from './polyline';
+import MultiPolygon from './multipolygon';
+import Circle from './circle';
 import Text from './text';
+import Bound from './bound';
+
 import asyncQueue from './helper/asyncQueue';
-import pjson from '../package.json';
-
-/* transform longitude to tile number */
-const lonToX = (lon, zoom) => ((lon + 180) / 360) * (2 ** zoom);
-/* transform latitude to tile number */
-const latToY = (lat, zoom) => (1 - Math.log(Math.tan(lat * Math.PI / 180) + 1
-  / Math.cos(lat * Math.PI / 180)) / Math.PI) / 2 * (2 ** zoom);
-
-const yToLat = (y, zoom) => Math.atan(Math.sinh(Math.PI * (1 - 2 * y / (2 ** zoom))))
-  / Math.PI * 180;
-
-const xToLon = (x, zoom) => x / (2 ** zoom) * 360 - 180;
+import geoutils from './helper/geo';
 
 const LINE_RENDER_CHUNK_SIZE = 1000;
 
@@ -37,17 +29,26 @@ class StaticMaps {
     this.padding = [this.paddingX, this.paddingY];
     this.tileUrl = this.options.tileUrl || 'https://tile.openstreetmap.org/{z}/{x}/{y}.png';
     this.tileSize = this.options.tileSize || 256;
+    this.subdomains = this.options.subdomains || [];
     this.tileRequestTimeout = this.options.tileRequestTimeout;
     this.tileRequestHeader = this.options.tileRequestHeader;
+    this.tileRequestLimit = Number.isFinite(this.options.tileRequestLimit)
+      ? Number(this.options.tileRequestLimit) : 2;
     this.reverseY = this.options.reverseY || false;
-    this.maxZoom = this.options.maxZoom;
-    this.zoomRange = this.options.zoomRange || { min: 1, max: 17 };
+    const zoomRange = this.options.zoomRange || {};
+    this.zoomRange = {
+      min: zoomRange.min || 1,
+      max: this.options.maxZoom || zoomRange.max || 17, // maxZoom
+    };
+    // this.maxZoom = this.options.maxZoom; DEPRECATED: use zoomRange.max instead
 
     // # features
     this.markers = [];
     this.lines = [];
-    this.polygons = [];
+    this.multipolygons = [];
+    this.circles = [];
     this.text = [];
+    this.bounds = [];
 
     // # fields that get set when map is rendered
     this.center = [];
@@ -68,6 +69,18 @@ class StaticMaps {
     this.lines.push(new Polyline(options));
   }
 
+  addMultiPolygon(options) {
+    this.multipolygons.push(new MultiPolygon(options));
+  }
+
+  addCircle(options) {
+    this.circles.push(new Circle(options));
+  }
+
+  addBound(options) {
+    this.bounds.push(new Bound(options));
+  }
+
   addText(options) {
     this.text.push(new Text(options));
   }
@@ -75,21 +88,20 @@ class StaticMaps {
   /**
     * Render static map with all map features that were added to map before
     */
-  render(center, zoom) {
-    if (!this.lines && !this.markers && !this.polygons && !(center && zoom)) {
+  async render(center, zoom) {
+    if (!this.lines && !this.markers && !this.multipolygons && !(center && zoom)) {
       throw new Error('Cannot render empty map: Add  center || lines || markers || polygons.');
     }
 
     this.center = center;
     this.zoom = zoom || this.calculateZoom();
 
-    if (this.maxZoom && this.zoom > this.maxZoom) {
-      this.zoom = this.maxZoom;
-    }
+    const maxZoom = this.zoomRange.max;
+    if (maxZoom && this.zoom > maxZoom) this.zoom = maxZoom;
 
     if (center && center.length === 2) {
-      this.centerX = lonToX(center[0], this.zoom);
-      this.centerY = latToY(center[1], this.zoom);
+      this.centerX = geoutils.lonToX(center[0], this.zoom);
+      this.centerY = geoutils.latToY(center[1], this.zoom);
     } else {
       // # get extent of all lines
       const extent = this.determineExtent(this.zoom);
@@ -98,14 +110,17 @@ class StaticMaps {
       const centerLon = (extent[0] + extent[2]) / 2;
       const centerLat = (extent[1] + extent[3]) / 2;
 
-      this.centerX = lonToX(centerLon, this.zoom);
-      this.centerY = latToY(centerLat, this.zoom);
+      this.centerX = geoutils.lonToX(centerLon, this.zoom);
+      this.centerY = geoutils.latToY(centerLat, this.zoom);
     }
 
     this.image = new Image(this.options);
 
-    return this.drawBaselayer()
-      .then(this.drawFeatures.bind(this));
+    await Promise.all([
+      this.drawBaselayer(),
+      this.loadMarker(),
+    ]);
+    return this.drawFeatures();
   }
 
   /**
@@ -117,12 +132,29 @@ class StaticMaps {
     // Add bbox to extent
     if (this.center && this.center.length >= 4) extents.push(this.center);
 
+    // add bounds to extent
+    if (this.bounds.length) {
+      this.bounds.forEach((bound) => extents.push(bound.extent()));
+    }
+
     // Add polylines and polygons to extent
     if (this.lines.length) {
       this.lines.forEach((line) => {
         extents.push(line.extent());
       });
-    } // extents.push(this.lines.map(function(line){ return line.extent(); }));
+    }
+    if (this.multipolygons.length) {
+      this.multipolygons.forEach((multipolygon) => {
+        extents.push(multipolygon.extent());
+      });
+    }
+
+    // Add circles to extent
+    if (this.circles.length) {
+      this.circles.forEach((circle) => {
+        extents.push(circle.extent());
+      });
+    }
 
     // Add marker to extent
     for (let i = 0; i < this.markers.length; i++) {
@@ -141,14 +173,14 @@ class StaticMaps {
 
       // # consider dimension of marker
       const ePx = marker.extentPx();
-      const x = lonToX(e[0], zoom);
-      const y = latToY(e[1], zoom);
+      const x = geoutils.lonToX(e[0], zoom);
+      const y = geoutils.latToY(e[1], zoom);
 
       extents.push([
-        xToLon(x - parseFloat(ePx[0]) / this.tileSize, zoom),
-        yToLat(y + parseFloat(ePx[1]) / this.tileSize, zoom),
-        xToLon(x + parseFloat(ePx[2]) / this.tileSize, zoom),
-        yToLat(y - parseFloat(ePx[3]) / this.tileSize, zoom),
+        geoutils.xToLon(x - parseFloat(ePx[0]) / this.tileSize, zoom),
+        geoutils.yToLat(y + parseFloat(ePx[1]) / this.tileSize, zoom),
+        geoutils.xToLon(x + parseFloat(ePx[2]) / this.tileSize, zoom),
+        geoutils.yToLat(y - parseFloat(ePx[3]) / this.tileSize, zoom),
       ]);
     }
 
@@ -166,10 +198,12 @@ class StaticMaps {
   calculateZoom() {
     for (let z = this.zoomRange.max; z >= this.zoomRange.min; z--) {
       const extent = this.determineExtent(z);
-      const width = (lonToX(extent[2], z) - lonToX(extent[0], z)) * this.tileSize;
+      const width = (geoutils.lonToX(extent[2], z)
+        - geoutils.lonToX(extent[0], z)) * this.tileSize;
       if (width > (this.width - (this.padding[0] * 2))) continue;
 
-      const height = (latToY(extent[1], z) - latToY(extent[3], z)) * this.tileSize;
+      const height = (geoutils.latToY(extent[1], z)
+        - geoutils.latToY(extent[3], z)) * this.tileSize;
       if (height > (this.height - (this.padding[1] * 2))) continue;
 
       return z;
@@ -193,7 +227,7 @@ class StaticMaps {
     return Number(Math.round(px));
   }
 
-  drawBaselayer() {
+  async drawBaselayer() {
     const xMin = Math.floor(this.centerX - (0.5 * this.width / this.tileSize));
     const yMin = Math.floor(this.centerY - (0.5 * this.height / this.tileSize));
     const xMax = Math.ceil(this.centerX + (0.5 * this.width / this.tileSize));
@@ -209,8 +243,15 @@ class StaticMaps {
         let tileY = (y + maxTile) % maxTile;
         if (this.reverseY) tileY = ((1 << this.zoom) - tileY) - 1;
 
+        let tileUrl = this.tileUrl.replace('{z}', this.zoom).replace('{x}', tileX).replace('{y}', tileY);
+
+        if (this.subdomains.length > 0) {
+          // replace subdomain with random domain from subdomains array
+          tileUrl = tileUrl.replace('{s}', this.subdomains[Math.floor(Math.random() * this.subdomains.length)]);
+        }
+
         result.push({
-          url: this.tileUrl.replace('{z}', this.zoom).replace('{x}', tileX).replace('{y}', tileY),
+          url: tileUrl,
           box: [
             this.xToPx(x),
             this.yToPx(y),
@@ -221,104 +262,169 @@ class StaticMaps {
       }
     }
 
-    const tilePromises = [];
-    result.forEach((r) => { tilePromises.push(this.getTile(r)); });
-
-    return new Promise((resolve, reject) => {
-      Promise.all(tilePromises)
-        .then((values) => this.image.draw(values.filter((v) => v.success).map((v) => v.tile)))
-        .then(resolve)
-        .catch(reject);
-    });
-  }
-
-  drawFeatures() {
-    return this.drawLines()
-      .then(this.loadMarker.bind(this))
-      .then(this.drawMarker.bind(this))
-      .then(this.drawText.bind(this));
-  }
-
-  drawText() {
-    return new Promise(async (resolve) => {
-      if (!this.text.length) resolve(true);
-
-      const queue = [];
-      this.text.forEach((text) => {
-        queue.push(async () => {
-          await this.renderText(text);
-        });
-      });
-      await asyncQueue(queue);
-      resolve(true);
-    });
+    const tiles = await this.getTiles(result);
+    return this.image.draw(tiles.filter((v) => v.success).map((v) => v.tile));
   }
 
   /**
-   * Render text on a baseimage
+   *  Render a circle to SVG
    */
-  async renderText(text) {
-    const baseImage = sharp(this.image.image);
-
-    return new Promise((resolve, reject) => {
-      const mapcoords = [
-        this.xToPx(lonToX(text.coord[0], this.zoom)),
-        this.yToPx(latToY(text.coord[1], this.zoom)),
-      ];
-
-      baseImage
-        .metadata()
-        .then((imageMetadata) => {
-          const svgPath = `
+  renderCircle(circle, imageMetadata) {
+    const latCenter = circle.coord[1];
+    const radiusInPixel = geoutils.meterToPixel(circle.radius, this.zoom, latCenter);
+    const x = this.xToPx(geoutils.lonToX(circle.coord[0], this.zoom));
+    const y = this.yToPx(geoutils.latToY(circle.coord[1], this.zoom));
+    const svgPath = `
             <svg
               width="${imageMetadata.width}px"
-              height="${imageMetadata.height}px"
+              height="${imageMetadata.height}"
               version="1.1"
               xmlns="http://www.w3.org/2000/svg">
-              <text
-                x="${mapcoords[0]}"
-                y="${mapcoords[1]}"
-                style="fill-rule: inherit; font-family: ${text.font};"
-                font-size="${text.size}pt"
-                stroke="${text.color}"
-                fill="${text.fill ? text.fill : 'none'}"
-                stroke-width="${text.width}"
-                text-anchor="${text.anchor}"
-              >
-                  ${text.text}</text>
+              <circle
+                cx="${x}"
+                cy="${y}"
+                r="${radiusInPixel}"
+                style="fill-rule: inherit;"
+                stroke="${circle.color}"
+                fill="${circle.fill}"
+                stroke-width="${circle.width}"
+                />
             </svg>`;
-
-          baseImage
-            .composite([{ input: Buffer.from(svgPath), top: 0, left: 0 }])
-            .toBuffer()
-            .then((buffer) => {
-              this.image.image = buffer;
-              resolve(buffer);
-            })
-            .catch(reject);
-        })
-        .catch(reject);
-    });
+    return { input: Buffer.from(svgPath), top: 0, left: 0 };
   }
 
-  async drawLines() {
-    if (!this.lines.length) return true;
-    const chunks = chunk(this.lines, LINE_RENDER_CHUNK_SIZE);
+  /**
+   *  Draw circles to the basemap
+   */
+  async drawCircles() {
+    if (!this.circles.length) return true;
     const baseImage = sharp(this.image.image);
     const imageMetadata = await baseImage.metadata();
-    const processedChunks = chunks.map((c) => this.processChunk(c, imageMetadata));
 
-    this.image.image = await baseImage
-      .composite(processedChunks)
-      .toBuffer();
+    const mpSvgs = this.circles
+      .map((circle) => this.renderCircle(circle, imageMetadata));
+
+    this.image.image = await baseImage.composite(mpSvgs).toBuffer();
 
     return true;
   }
 
+  /**
+   * Render text to SVG
+   */
+  renderText(text, imageMetadata) {
+    const mapcoords = [
+      this.xToPx(geoutils.lonToX(text.coord[0], this.zoom)),
+      this.yToPx(geoutils.latToY(text.coord[1], this.zoom)),
+    ];
+
+    const svgPath = `
+      <svg
+        width="${imageMetadata.width}px"
+        height="${imageMetadata.height}px"
+        version="1.1"
+        xmlns="http://www.w3.org/2000/svg">
+        <text
+          x="${mapcoords[0]}"
+          y="${mapcoords[1]}"
+          style="fill-rule: inherit; font-family: ${text.font};"
+          font-size="${text.size}pt"
+          stroke="${text.color}"
+          fill="${text.fill ? text.fill : 'none'}"
+          stroke-width="${text.width}"
+          text-anchor="${text.anchor}"
+        >
+            ${text.text}</text>
+      </svg>`;
+
+    return { input: Buffer.from(svgPath), top: 0, left: 0 };
+  }
+
+  /**
+   *  Draw texts to the baemap
+   */
+  async drawText() {
+    if (!this.text.length) return null;
+
+    const baseImage = sharp(this.image.image);
+    const imageMetadata = await baseImage.metadata();
+
+    const txtSvgs = this.text
+      .map((text) => this.renderText(text, imageMetadata));
+
+    this.image.image = await baseImage.composite(txtSvgs).toBuffer();
+
+    return true;
+  }
+
+  /**
+   *  Render MultiPolygon to SVG
+   */
+  multipolygonToPath(multipolygon) {
+    const shapeArrays = multipolygon.coords.map((shape) => shape.map((coord) => [
+      this.xToPx(geoutils.lonToX(coord[0], this.zoom)),
+      this.yToPx(geoutils.latToY(coord[1], this.zoom)),
+    ]));
+
+    const pathArrays = shapeArrays.map((points) => {
+      const startPoint = points.shift();
+
+      const pathParts = [
+        `M ${startPoint[0]} ${startPoint[1]}`,
+        ...points.map((p) => `L ${p[0]} ${p[1]}`),
+        'Z',
+      ];
+
+      return pathParts.join(' ');
+    });
+
+    return `<path
+             d="${pathArrays.join(' ')}"
+             style="fill-rule: inherit;"
+             stroke="${multipolygon.color}"
+             fill="${multipolygon.fill ? multipolygon.fill : 'none'}"
+             stroke-width="${multipolygon.width}"/>`;
+  }
+
+  /**
+   *  Render MultiPolygon to SVG
+   */
+  renderMultiPolygon(multipolygon, imageMetadata) {
+    const svgPath = `
+            <svg
+              width="${imageMetadata.width}px"
+              height="${imageMetadata.height}"
+              version="1.1"
+              xmlns="http://www.w3.org/2000/svg">
+              ${this.multipolygonToPath(multipolygon)}
+            </svg>`;
+    return { input: Buffer.from(svgPath), top: 0, left: 0 };
+  }
+
+  /**
+   *  Draw Multipolygon to the basemap
+   */
+  async drawMultiPolygons() {
+    if (!this.multipolygons.length) return true;
+
+    const baseImage = sharp(this.image.image);
+    const imageMetadata = await baseImage.metadata();
+
+    const mpSvgs = this.multipolygons
+      .map((multipolygon) => this.renderMultiPolygon(multipolygon, imageMetadata));
+
+    this.image.image = await baseImage.composite(mpSvgs).toBuffer();
+
+    return true;
+  }
+
+  /**
+   *  Render Polyline to SVG
+   */
   lineToSvg(line) {
     const points = line.coords.map((coord) => [
-      this.xToPx(lonToX(coord[0], this.zoom)),
-      this.yToPx(latToY(coord[1], this.zoom)),
+      this.xToPx(geoutils.lonToX(coord[0], this.zoom)),
+      this.yToPx(geoutils.latToY(coord[1], this.zoom)),
     ]);
     return `<${(line.type === 'polyline') ? 'polyline' : 'polygon'}
                 style="fill-rule: inherit;"
@@ -330,35 +436,76 @@ class StaticMaps {
                 fill-opacity="${line.fillOpacity}"/>`;
   }
 
-  processChunk(lines, imageMetadata) {
+  /**
+   *  Render Polyline / Polygon to SVG
+   */
+  renderLine(lines, imageMetadata) {
     const svgPath = `
             <svg
               width="${imageMetadata.width}px"
               height="${imageMetadata.height}"
               version="1.1"
               xmlns="http://www.w3.org/2000/svg">
-              ${lines.map((line) => this.lineToSvg(line))}              
+              ${lines.map((line) => this.lineToSvg(line))}
             </svg>`;
     return { input: Buffer.from(svgPath), top: 0, left: 0 };
   }
 
+  /**
+   *  Draw polylines / polygons to the basemap
+   */
+  async drawLines() {
+    if (!this.lines.length) return true;
+    const chunks = chunk(this.lines, LINE_RENDER_CHUNK_SIZE);
+    const baseImage = sharp(this.image.image);
+    const imageMetadata = await baseImage.metadata();
+    const processedChunks = chunks.map((c) => this.renderLine(c, imageMetadata));
+
+    this.image.image = await baseImage
+      .composite(processedChunks)
+      .toBuffer();
+
+    return true;
+  }
+
+  /**
+   *  Draw markers to the basemap
+   */
   drawMarker() {
-    return new Promise(async (resolve) => {
-      const queue = [];
-      this.markers.forEach((marker) => {
-        queue.push(async () => {
-          this.image.image = await sharp(this.image.image)
-            .composite([{
-              input: marker.imgData,
-              top: Math.round(marker.position[1]),
-              left: Math.round(marker.position[0]),
-            }])
-            .toBuffer();
-        });
+    const queue = [];
+    this.markers.forEach((marker) => {
+      queue.push(async () => {
+        const top = Math.round(marker.position[1]);
+        const left = Math.round(marker.position[0]);
+
+        if (
+          top < 0
+          || left < 0
+          || top > this.height
+          || left > this.width
+        ) return;
+
+        this.image.image = await sharp(this.image.image)
+          .composite([{
+            input: marker.imgData,
+            top,
+            left,
+          }])
+          .toBuffer();
       });
-      await asyncQueue(queue);
-      resolve(true);
     });
+    return asyncQueue(queue);
+  }
+
+  /**
+   *  Draw all features to the basemap
+   */
+  async drawFeatures() {
+    await this.drawLines();
+    await this.drawMultiPolygons();
+    await this.drawMarker();
+    await this.drawText();
+    await this.drawCircles();
   }
 
   /**
@@ -376,12 +523,12 @@ class StaticMaps {
         try {
           // Load marker from remote url
           if (isUrl) {
-            const img = await request.get({
+            const img = await got.get({
               rejectUnauthorized: false,
               url: icon.file,
-              encoding: null,
+              responseType: 'buffer',
             });
-            icon.data = await sharp(img).toBuffer();
+            icon.data = await sharp(img.body).toBuffer();
           } else {
             // Load marker from local fs
             icon.data = await sharp(icon.file).toBuffer();
@@ -395,8 +542,8 @@ class StaticMaps {
           this.markers.forEach((mark) => {
             const marker = mark;
             marker.position = [
-              this.xToPx(lonToX(marker.coord[0], this.zoom)) - marker.offset[0],
-              this.yToPx(latToY(marker.coord[1], this.zoom)) - marker.offset[1],
+              this.xToPx(geoutils.lonToX(marker.coord[0], this.zoom)) - marker.offset[0],
+              this.yToPx(geoutils.latToY(marker.coord[1], this.zoom)) - marker.offset[1],
             ];
             const imgData = find(icons, { file: marker.img });
             marker.set(imgData.data);
@@ -409,22 +556,22 @@ class StaticMaps {
   }
 
   /**
-   *  Fetching tiles from endpoint
+   *  Fetching tile from endpoint
    */
   getTile(data) {
     return new Promise((resolve) => {
       const options = {
         url: data.url,
-        encoding: null,
+        responseType: 'buffer',
         resolveWithFullResponse: true,
         headers: this.tileRequestHeader || {},
         timeout: this.tileRequestTimeout,
       };
 
-      const defaultAgent = `staticmaps@${pjson.version} (Node.js ${process.version})`;
-      options.headers['User-Agent'] = options.headers['User-Agent'] || defaultAgent;
+      // const defaultAgent = `staticmaps@${pjson.version}`;
+      // options.headers['User-Agent'] = options.headers['User-Agent'] || defaultAgent;
 
-      request.get(options).then((res) => {
+      got.get(options).then((res) => {
         resolve({
           success: true,
           tile: {
@@ -438,6 +585,40 @@ class StaticMaps {
         error,
       }));
     });
+  }
+
+  /**
+   *  Fetching tiles and limit concurrent connections
+   */
+  async getTiles(baseLayers) {
+    const limit = this.tileRequestLimit;
+
+    // Limit concurrent connections to tiles server
+    // https://operations.osmfoundation.org/policies/tiles/#technical-usage-requirements
+    if (Number(limit)) {
+      const aQueue = [];
+      const tiles = [];
+      for (let i = 0, j = baseLayers.length; i < j; i += limit) {
+        const chunks = baseLayers.slice(i, i + limit);
+        const sQueue = [];
+        aQueue.push(async () => {
+          chunks.forEach((r) => {
+            sQueue.push((async () => {
+              const tile = await this.getTile(r);
+              tiles.push(tile);
+            })());
+          });
+          await Promise.all(sQueue);
+        });
+      }
+      await asyncQueue(aQueue);
+      return tiles;
+    }
+
+    // Do not limit concurrent connections at all
+    const tilePromises = [];
+    baseLayers.forEach((r) => { tilePromises.push(this.getTile(r)); });
+    return Promise.all(tilePromises);
   }
 }
 

@@ -9,7 +9,7 @@ export default class Polyline {
     this.coords = this.options.coords;
     this.color = this.options.color || '#000000BB';
     this.fill = this.options.fill;
-    this.width = this.options.width || 3;
+    this.width = Number.isFinite(this.options.width) ? Number(this.options.width) : 3;
     this.opacity = this.options.opacity || 1;
     this.fillOpacity = this.options.fillOpacity || 1;
     this.simplify = this.options.simplify || false;
@@ -22,10 +22,10 @@ export default class Polyline {
    */
   extent() {
     return [
-      Math.min(...this.coords.map(c => c[0])),
-      Math.min(...this.coords.map(c => c[1])),
-      Math.max(...this.coords.map(c => c[0])),
-      Math.max(...this.coords.map(c => c[1])),
+      Math.min(...this.coords.map((c) => c[0])),
+      Math.min(...this.coords.map((c) => c[1])),
+      Math.max(...this.coords.map((c) => c[0])),
+      Math.max(...this.coords.map((c) => c[1])),
     ];
   }
 }
